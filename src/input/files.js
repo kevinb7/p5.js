@@ -12,6 +12,35 @@ define(function (require) {
   var p5 = require('core');
   var reqwest = require('reqwest');
 
+  // Source: 
+  // http://www.nczonline.net/blog/2010/05/25/
+  // cross-domain-ajax-with-cross-origin-resource-sharing/
+  function createCORSRequest(method, url) {
+    /* global XDomainRequest */
+    var xhr = new XMLHttpRequest();
+    if ('withCredentials' in xhr) {
+
+      // Check if the XMLHttpRequest object has a "withCredentials" property.
+      // "withCredentials" only exists on XMLHTTPRequest2 objects.
+      xhr.open(method, url, true);
+
+    } else if (typeof XDomainRequest !== 'undefined') {
+
+      // Otherwise, check if XDomainRequest.
+      // XDomainRequest only exists in IE, and is IE's way of making CORS 
+      // requests.
+      xhr = new XDomainRequest();
+      xhr.open(method, url);
+
+    } else {
+
+      // Otherwise, CORS is not supported by the browser.
+      xhr = null;
+
+    }
+    return xhr;
+  }
+
   //BufferedReader
   p5.prototype.createInput = function() {
     // TODO
@@ -243,140 +272,149 @@ define(function (require) {
     }
 
     var t = new p5.Table();
-    reqwest({url: path, crossOrigin: true})
-      .then(function(resp) {
 
-        var state = {};
+    var xhr = createCORSRequest('GET', path);
+    if (!xhr) {
+      throw new Error('CORS not supported');
+    }
 
-        // define constants
-        var PRE_TOKEN = 0,
-            MID_TOKEN = 1,
-            POST_TOKEN = 2,
-            POST_RECORD = 4;
+    xhr.onload = function() {
+      var resp = xhr.responseText;
 
-        var QUOTE = '\"',
-               CR = '\r',
-               LF = '\n';
+      var state = {};
 
-        var records = [];
-        var offset = 0;
-        var currentRecord = null;
-        var currentChar;
+      // define constants
+      var PRE_TOKEN = 0,
+        MID_TOKEN = 1,
+        POST_TOKEN = 2,
+        POST_RECORD = 4;
 
-        var recordBegin = function () {
-          state.escaped = false;
-          currentRecord = [];
-          tokenBegin();
-        };
+      var QUOTE = '\"',
+        CR = '\r',
+        LF = '\n';
 
-        var recordEnd = function () {
-          state.currentState = POST_RECORD;
-          records.push(currentRecord);
-          currentRecord = null;
-        };
+      var records = [];
+      var offset = 0;
+      var currentRecord = null;
+      var currentChar;
 
-        var tokenBegin = function() {
-          state.currentState = PRE_TOKEN;
-          state.token = '';
-        };
+      var recordBegin = function () {
+        state.escaped = false;
+        currentRecord = [];
+        tokenBegin();
+      };
 
-        var tokenEnd = function() {
-          currentRecord.push(state.token);
-          tokenBegin();
-        };
+      var recordEnd = function () {
+        state.currentState = POST_RECORD;
+        records.push(currentRecord);
+        currentRecord = null;
+      };
 
-        while(true) {
-          currentChar = resp[offset++];
-          
-          // EOF
-          if(currentChar == null) {
-            if (state.escaped) {
-              throw new Error('Unclosed quote in file.');
-            }
-            if (currentRecord){
-              tokenEnd();
-              recordEnd();
-              break;
-            }
+      var tokenBegin = function() {
+        state.currentState = PRE_TOKEN;
+        state.token = '';
+      };
+
+      var tokenEnd = function() {
+        currentRecord.push(state.token);
+        tokenBegin();
+      };
+
+      while(true) {
+        currentChar = resp[offset++];
+
+        // EOF
+        if(currentChar == null) {
+          if (state.escaped) {
+            throw new Error('Unclosed quote in file.');
           }
-          if(currentRecord === null) {
-            recordBegin();
+          if (currentRecord){
+            tokenEnd();
+            recordEnd();
+            break;
           }
+        }
+        if(currentRecord === null) {
+          recordBegin();
+        }
 
-          // Handle opening quote
-          if (state.currentState === PRE_TOKEN) {
-            if (currentChar === QUOTE) {
-              state.escaped = true;
-              state.currentState = MID_TOKEN;
-              continue;
-            }
+        // Handle opening quote
+        if (state.currentState === PRE_TOKEN) {
+          if (currentChar === QUOTE) {
+            state.escaped = true;
             state.currentState = MID_TOKEN;
-          }
-
-          // mid-token and escaped, look for sequences and end quote
-          if (state.currentState === MID_TOKEN && state.escaped) {
-            if (currentChar === QUOTE) {
-              if (resp[offset] === QUOTE) {
-                state.token += QUOTE;
-                offset++;
-              }
-              else {
-                state.escaped = false;
-                state.currentState = POST_TOKEN;
-              }
-            }
-            else {
-              state.token += currentChar;
-            }
             continue;
           }
+          state.currentState = MID_TOKEN;
+        }
 
-
-          // fall-through: mid-token or post-token, not escaped
-          if (currentChar === CR ) {
-            if( resp[offset] === LF  ) {
+        // mid-token and escaped, look for sequences and end quote
+        if (state.currentState === MID_TOKEN && state.escaped) {
+          if (currentChar === QUOTE) {
+            if (resp[offset] === QUOTE) {
+              state.token += QUOTE;
               offset++;
             }
-            tokenEnd();
-            recordEnd();
+            else {
+              state.escaped = false;
+              state.currentState = POST_TOKEN;
+            }
           }
-          else if (currentChar === LF) {
-            tokenEnd();
-            recordEnd();
-          }
-          else if (currentChar === sep) {
-            tokenEnd();
-          }
-          else if( state.currentState === MID_TOKEN ){
+          else {
             state.token += currentChar;
           }
+          continue;
         }
 
-        // set up column names
-        if (header) {
-          t.columns = records.shift();
-        }
-        else {
-          for (i = 0; i < records.length; i++){
-            t.columns[i] = i.toString();
+
+        // fall-through: mid-token or post-token, not escaped
+        if (currentChar === CR ) {
+          if( resp[offset] === LF  ) {
+            offset++;
           }
+          tokenEnd();
+          recordEnd();
         }
-        var row;
-        for (i =0; i<records.length; i++) {
-          row = new p5.TableRow();
-          row.arr = records[i];
-          row.obj = makeObject(records[i], t.columns);
-          t.addRow(row);
+        else if (currentChar === LF) {
+          tokenEnd();
+          recordEnd();
         }
-        if (callback !== null) {
-          callback(t);
+        else if (currentChar === sep) {
+          tokenEnd();
         }
-      })
-      .fail(function(err,msg){
-        if (typeof callback !== 'undefined') {
-          callback(false);
+        else if( state.currentState === MID_TOKEN ){
+          state.token += currentChar;
         }
-      });
+      }
+
+      // set up column names
+      if (header) {
+        t.columns = records.shift();
+      }
+      else {
+        for (i = 0; i < records.length; i++){
+          t.columns[i] = i.toString();
+        }
+      }
+      var row;
+      for (i =0; i<records.length; i++) {
+        row = new p5.TableRow();
+        row.arr = records[i];
+        row.obj = makeObject(records[i], t.columns);
+        t.addRow(row);
+      }
+      if (callback !== null) {
+        callback(t);
+      }
+    };
+
+    xhr.onerror = function() {
+      if (typeof callback !== 'undefined') {
+        callback(false);
+      }
+    };
+
+    xhr.send();
 
     return t;
   };
